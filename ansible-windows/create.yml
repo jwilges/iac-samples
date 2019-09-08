@@ -1,0 +1,121 @@
+---
+- hosts: localhost
+  gather_facts: no
+  vars:
+    aws_region: us-west-1
+    instance_type: t3.small
+    builder_name: 'builder-windows-2019' 
+    key_name: '{{ builder_name }}'
+  tasks:
+    - name: Find Windows Server 2019 AMIs
+      ec2_ami_facts:
+        owners: amazon
+        region: '{{ aws_region }}'
+        filters:
+          name: 'Windows_Server-2019-English-Full-Base-*'
+          architecture: x86_64
+          virtualization-type: hvm
+          ena-support: 'true'
+      register: windows_amis
+    - name: Find the latest Windows Server 2019 AMI
+      set_fact:
+        latest_windows_ami: >
+          {{ windows_amis.images | sort(attribute='creation_date') | last }}
+    - name: Remove temporary builder key pair
+      ec2_key:
+        name: '{{ key_name }}'
+        region: '{{ aws_region }}'
+        state: absent
+    - name: Add temporary builder key pair
+      ec2_key:
+        name: '{{ key_name }}'
+        region: '{{ aws_region }}'
+      register: ec2_builder_key
+    # - debug:
+    #     msg: 'Key: {{ ec2_builder_key }}'
+    - name: Store temporary builder private key locally
+      copy:
+        content: '{{ ec2_builder_key.key.private_key }}'
+        dest: ./winrm_key.pem
+      when: ec2_builder_key.changed
+    - name: Add temporary security group
+      ec2_group:
+        name: '{{ builder_name }}'
+        description: Builder allowing inbound HTTP, RDP, and WinRM HTTPS
+        region: '{{ aws_region }}'
+        rules:
+          - proto: tcp
+            from_port: 80
+            to_port: 80
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 3389
+            to_port: 3389
+            cidr_ip: 0.0.0.0/0
+          - proto: tcp
+            from_port: 5985
+            to_port: 5986
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: -1
+            cidr_ip: 0.0.0.0/0
+      register: ec2_builder_sg
+    - name: Add builder instance
+      ec2:
+        region: '{{ aws_region }}'
+        key_name: '{{ key_name }}'
+        instance_type: '{{ instance_type }}'
+        group_id: '{{ ec2_builder_sg.group_id }}'
+        image: '{{ latest_windows_ami.image_id }}'
+        user_data: '{{ lookup("template", "./enable_winrm_https.ps1.j2") }}'
+        wait: yes
+        wait_timeout: 500
+        exact_count: 1
+        count_tag:
+          Name: '{{ builder_name }}'
+          Builder: 'ansible'
+        instance_tags:
+          Name: '{{ builder_name }}'
+          Builder: 'ansible'
+      register: ec2_builder
+    - name: Store first (and only) tagged builder
+      set_fact:
+        ec2_builder: '{{ ec2_builder.tagged_instances[0] }}'
+    - name: Get builder instance password
+      ec2_win_password:
+        instance_id: '{{ ec2_builder.id }}'
+        region: '{{ aws_region }}'
+        key_file: './winrm_key.pem'
+        wait: yes
+        wait_timeout: 300
+      register: ec2_builder_password
+    - debug:
+        msg: 'Instance password: {{ ec2_builder_password }}'
+    - name: Wait for WinRM on builder instance
+      wait_for:
+        host: '{{ ec2_builder.public_ip }}'
+        port: 5986
+        timeout: 300
+    - name: Add builder hosts to group
+      add_host:
+        name: 'builder-{{ ec2_builder.id }}'
+        ansible_host: '{{ ec2_builder.public_ip }}'
+        ansible_port: 5986
+        ansible_password: '{{ ec2_builder_password }}'
+        groups: builder
+    # - name: Remove temporary builder key pair
+    #   ec2_key:
+    #     name: '{{ key_name }}'
+    #     region: '{{ aws_region }}'
+    #     state: absent
+- hosts: builder
+  vars:
+    ansible_user: Administrator
+    ansible_connection: winrm
+    ansible_winrm_transport: basic
+    ansible_winrm_scheme: https
+    ansible_winrm_server_cert_validation: ignore
+  tasks:
+    - win_ping:
+  # roles:
+  #   - ping

@@ -1,0 +1,12 @@
+<powershell>
+wmic useraccount where "name='Administrator'" set PasswordExpires=FALSE
+
+# Leverage Ansible's Windows RM setup script to enable default HTTP and HTTPS listeners.
+# See: https://docs.ansible.com/ansible/latest/user_guide/windows_setup.html#winrm-setup
+# Ansible's setup script is a slightly more involved rendition of:
+# winrm quickconfig -q
+$url = "https://raw.githubusercontent.com/ansible/ansible/devel/examples/scripts/ConfigureRemotingForAnsible.ps1"
+$file = "$env:temp\ConfigureRemotingForAnsible.ps1"
+(New-Object -TypeName System.Net.WebClient).DownloadFile($url, $file)
+powershell.exe -ExecutionPolicy ByPass -File $file
+</powershell>
